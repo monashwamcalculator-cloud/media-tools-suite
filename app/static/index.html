@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Fast browser-based image and video utilities: remove backgrounds, upscale, enhance, compress, convert, and extract MP3 audio." />
+  <title>MediaForge — Image & Video Tools</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="#">Media<span>Forge</span></a>
+  <nav><a href="#image-tools">Image Tools</a><a href="#video-tools">Video Tools</a><a href="#faq">FAQ</a></nav>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="pill">10 privacy-friendly media tools</div>
+    <h1>Make images and videos <span>web-ready</span> in minutes.</h1>
+    <p>Remove backgrounds, upscale, enhance, compress, convert, and extract audio with a clean, responsive workflow.</p>
+    <div class="hero-actions"><a class="btn primary" href="#image-tools">Start with an image</a><a class="btn ghost" href="#video-tools">Process a video</a></div>
+  </section>
+
+  <section id="image-tools" class="section">
+    <div class="section-head"><div><span class="eyebrow">IMAGE TOOLKIT</span><h2>Image tools</h2></div><p>PNG, JPG, and WebP supported.</p></div>
+    <div class="cards" id="imageCards"></div>
+  </section>
+
+  <section id="video-tools" class="section">
+    <div class="section-head"><div><span class="eyebrow">VIDEO TOOLKIT</span><h2>Video tools</h2></div><p>Powered by FFmpeg on your server.</p></div>
+    <div class="cards" id="videoCards"></div>
+  </section>
+
+  <section id="faq" class="section faq">
+    <div class="section-head"><div><span class="eyebrow">FAQ</span><h2>Built for a real tool website</h2></div></div>
+    <details open><summary>Where are uploaded files processed?</summary><p>Files are processed on the server running this app. Add your own scheduled cleanup policy in production.</p></details>
+    <details><summary>Is background removal AI-powered?</summary><p>If the optional rembg package/model is installed, the app uses it automatically. Otherwise it falls back to an offline GrabCut method.</p></details>
+    <details><summary>Does video processing need an API?</summary><p>No. Upscaling, enhancement, compression, audio extraction, and conversion use FFmpeg.</p></details>
+  </section>
+</main>
+
+<div class="modal" id="toolModal" aria-hidden="true">
+  <div class="modal-card">
+    <button class="close" id="closeModal" aria-label="Close">×</button>
+    <div class="modal-icon" id="modalIcon"></div>
+    <h2 id="modalTitle"></h2>
+    <p id="modalDesc"></p>
+    <form id="toolForm">
+      <label class="dropzone" id="dropzone">
+        <input type="file" id="fileInput" name="file" required />
+        <strong>Choose a file</strong>
+        <span id="fileHint">or drag & drop here</span>
+      </label>
+      <div id="options"></div>
+      <button class="btn primary full" id="processBtn" type="submit">Process file</button>
+      <div class="progress-wrap" id="progressWrap"><div class="progress"><span id="progressBar"></span></div><p id="status">Uploading…</p></div>
+      <a class="btn success full" id="downloadBtn" hidden>Download result</a>
+      <p class="error" id="error"></p>
+    </form>
+  </div>
+</div>
+
+<footer><div class="brand">Media<span>Forge</span></div><p>Use only media you own or have permission to process.</p></footer>
+<script src="/static/app.js"></script>
+</body>
+</html>
