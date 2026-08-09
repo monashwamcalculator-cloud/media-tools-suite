@@ -142,8 +142,35 @@ def read_image(path: Path) -> Image.Image:
         raise HTTPException(400, f"Invalid image: {e}")
 
 
+U2NETP_NET = None
+
+def get_u2netp_net():
+    global U2NETP_NET
+    if U2NETP_NET is not None:
+        return U2NETP_NET
+
+    model_path = Path(tempfile.gettempdir()) / "mediaforge" / "models" / "u2netp.onnx"
+    if not model_path.exists():
+        try:
+            model_path.parent.mkdir(parents=True, exist_ok=True)
+            url = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx"
+            import urllib.request
+            urllib.request.urlretrieve(url, model_path)
+        except Exception as e:
+            print("Downloading U2NetP model failed:", e)
+            return None
+
+    try:
+        net = cv2.dnn.readNetFromONNX(str(model_path))
+        U2NETP_NET = net
+        return net
+    except Exception as e:
+        print("Failed to load U2NetP ONNX model:", e)
+        return None
+
+
 def smart_remove_background(pil_img: Image.Image) -> Image.Image:
-    # Optional AI path when rembg is installed.
+    # 1. Optional AI path when rembg is installed.
     try:
         from rembg import remove  # type: ignore
         buf = io.BytesIO()
@@ -153,7 +180,40 @@ def smart_remove_background(pil_img: Image.Image) -> Image.Image:
     except Exception:
         pass
 
-    # Person-focused background removal using face/body region targeting and GrabCut
+    # 2. Pure OpenCV DNN U2NetP AI Neural Network Inference
+    try:
+        net = get_u2netp_net()
+        if net is not None:
+            rgb_orig = pil_img.convert("RGB")
+            rgb_float = np.array(rgb_orig, dtype=np.float32) / 255.0
+            h, w = rgb_float.shape[:2]
+
+            resized = cv2.resize(rgb_float, (320, 320), interpolation=cv2.INTER_AREA)
+            mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+            std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+            normalized = (resized - mean) / std
+
+            blob = np.transpose(normalized, (2, 0, 1))[np.newaxis, :, :, :].astype(np.float32)
+            net.setInput(blob)
+            out = net.forward()
+
+            pred = out[0, 0]
+            p_min, p_max = pred.min(), pred.max()
+            if p_max > p_min:
+                pred = (pred - p_min) / (p_max - p_min)
+            mask = (pred * 255).astype(np.uint8)
+
+            mask_full = cv2.resize(mask, (w, h), interpolation=cv2.INTER_LINEAR)
+            mask_full = cv2.GaussianBlur(mask_full, (3, 3), 0)
+
+            bgr = cv2.cvtColor(np.array(rgb_orig), cv2.COLOR_RGB2BGR)
+            rgba = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGBA)
+            rgba[:, :, 3] = mask_full
+            return Image.fromarray(rgba)
+    except Exception as e:
+        print("U2NetP ONNX inference failed, using fallback:", e)
+
+    # 3. Person-focused background removal fallback using face/body region targeting and GrabCut
     rgb = np.array(pil_img.convert("RGB"))
     bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     h, w = bgr.shape[:2]
@@ -174,33 +234,27 @@ def smart_remove_background(pil_img: Image.Image) -> Image.Image:
     ph, pw = proc_bgr.shape[:2]
     gray = cv2.cvtColor(proc_bgr, cv2.COLOR_BGR2GRAY)
 
-    # Initialize mask for GrabCut: default border as Definite Background
     mask = np.full((ph, pw), cv2.GC_BGD, dtype=np.uint8)
     border_x = max(1, int(pw * 0.03))
     border_y = max(1, int(ph * 0.03))
     mask[border_y:ph-border_y, border_x:pw-border_x] = cv2.GC_PR_BGD
 
-    # Detect human face to locate primary person subject
     detected_person = False
     try:
         cascade_path = getattr(cv2.data, "haarcascades", "") + "haarcascade_frontalface_default.xml"
         face_cascade = cv2.CascadeClassifier(cascade_path)
         faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(25, 25))
         if len(faces) > 0:
-            # Pick largest/primary face
             primary_face = max(faces, key=lambda f: f[2] * f[3])
             fx, fy, fw, fh = primary_face
 
-            # Estimate person body bounds (head, hair, shoulders, torso)
             px1 = max(0, int(fx - fw * 0.8))
             py1 = max(0, int(fy - fh * 0.4))
             px2 = min(pw, int(fx + fw * 1.8))
             py2 = min(ph, int(fy + fh * 4.5))
 
-            # Person region is Probable Foreground
             mask[py1:py2, px1:px2] = cv2.GC_PR_FGD
 
-            # Core face & upper torso is Definite Foreground
             core_x1 = max(0, int(fx - fw * 0.2))
             core_y1 = max(0, int(fy))
             core_x2 = min(pw, int(fx + fw * 1.2))
@@ -211,7 +265,6 @@ def smart_remove_background(pil_img: Image.Image) -> Image.Image:
         pass
 
     if not detected_person:
-        # Fallback human silhouette centered region
         cx1 = int(pw * 0.15)
         cy1 = int(ph * 0.08)
         cx2 = int(pw * 0.85)
@@ -225,7 +278,6 @@ def smart_remove_background(pil_img: Image.Image) -> Image.Image:
         cv2.grabCut(proc_bgr, mask, None, bgd, fgd, 4, cv2.GC_INIT_WITH_MASK)
         fgmask = np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 255, 0).astype("uint8")
     except cv2.error:
-        # Color-distance fallback using corner median as approximate background.
         corners = np.vstack([
             proc_bgr[: max(1,ph//10), : max(1,pw//10)].reshape(-1,3),
             proc_bgr[: max(1,ph//10), -max(1,pw//10):].reshape(-1,3),
