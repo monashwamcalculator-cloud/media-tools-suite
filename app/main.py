@@ -110,32 +110,49 @@ def smart_remove_background(pil_img: Image.Image) -> Image.Image:
     except Exception:
         pass
 
-    # Tested offline fallback: GrabCut with a safe centered-subject rectangle.
+    # Tested offline fallback: Fast scaled GrabCut with a safe centered-subject rectangle.
     rgb = np.array(pil_img.convert("RGB"))
     bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     h, w = bgr.shape[:2]
     if h < 10 or w < 10:
         raise HTTPException(400, "Image is too small")
-    margin_x = max(1, int(w * 0.04))
-    margin_y = max(1, int(h * 0.04))
-    rect = (margin_x, margin_y, max(2, w - 2 * margin_x), max(2, h - 2 * margin_y))
-    mask = np.zeros((h, w), np.uint8)
+
+    # Downscale for ultra-fast GrabCut computation if image is large
+    max_dim = 600
+    scale = 1.0
+    if max(h, w) > max_dim:
+        scale = max_dim / float(max(h, w))
+        small_w = max(2, int(w * scale))
+        small_h = max(2, int(h * scale))
+        proc_bgr = cv2.resize(bgr, (small_w, small_h), interpolation=cv2.INTER_AREA)
+    else:
+        proc_bgr = bgr
+
+    ph, pw = proc_bgr.shape[:2]
+    margin_x = max(1, int(pw * 0.04))
+    margin_y = max(1, int(ph * 0.04))
+    rect = (margin_x, margin_y, max(2, pw - 2 * margin_x), max(2, ph - 2 * margin_y))
+    mask = np.zeros((ph, pw), np.uint8)
     bgd = np.zeros((1, 65), np.float64)
     fgd = np.zeros((1, 65), np.float64)
     try:
-        cv2.grabCut(bgr, mask, rect, bgd, fgd, 5, cv2.GC_INIT_WITH_RECT)
+        cv2.grabCut(proc_bgr, mask, rect, bgd, fgd, 3, cv2.GC_INIT_WITH_RECT)
         fgmask = np.where((mask == 2) | (mask == 0), 0, 255).astype("uint8")
     except cv2.error:
         # Color-distance fallback using corner median as approximate background.
         corners = np.vstack([
-            bgr[: max(1,h//10), : max(1,w//10)].reshape(-1,3),
-            bgr[: max(1,h//10), -max(1,w//10):].reshape(-1,3),
-            bgr[-max(1,h//10):, : max(1,w//10)].reshape(-1,3),
-            bgr[-max(1,h//10):, -max(1,w//10):].reshape(-1,3),
+            proc_bgr[: max(1,ph//10), : max(1,pw//10)].reshape(-1,3),
+            proc_bgr[: max(1,ph//10), -max(1,pw//10):].reshape(-1,3),
+            proc_bgr[-max(1,ph//10):, : max(1,pw//10)].reshape(-1,3),
+            proc_bgr[-max(1,ph//10):, -max(1,pw//10):].reshape(-1,3),
         ])
         bg = np.median(corners, axis=0)
-        dist = np.linalg.norm(bgr.astype(np.float32) - bg.astype(np.float32), axis=2)
+        dist = np.linalg.norm(proc_bgr.astype(np.float32) - bg.astype(np.float32), axis=2)
         fgmask = np.clip((dist - 15) * 8, 0, 255).astype(np.uint8)
+
+    if scale != 1.0:
+        fgmask = cv2.resize(fgmask, (w, h), interpolation=cv2.INTER_LINEAR)
+
     fgmask = cv2.GaussianBlur(fgmask, (0, 0), 1.2)
     rgba = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGBA)
     rgba[:, :, 3] = fgmask
@@ -197,9 +214,9 @@ async def image_enhance(file: UploadFile = File(...), strength: float = Form(1.0
         clahe = cv2.createCLAHE(clipLimit=1.6 + strength * 0.8, tileGridSize=(8, 8))
         l = clahe.apply(l)
         arr = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
-        arr = cv2.fastNlMeansDenoisingColored(arr, None, 2 + int(strength), 2 + int(strength), 7, 21)
-        blur = cv2.GaussianBlur(arr, (0, 0), 1.1)
-        arr = cv2.addWeighted(arr, 1.0 + 0.18 * strength, blur, -0.18 * strength, 0)
+        denoised = cv2.bilateralFilter(arr, d=5, sigmaColor=20 * strength, sigmaSpace=20 * strength)
+        blur = cv2.GaussianBlur(denoised, (0, 0), 1.1)
+        arr = cv2.addWeighted(denoised, 1.0 + 0.18 * strength, blur, -0.18 * strength, 0)
         out = output_path("jpg")
         Image.fromarray(cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)).save(out, "JPEG", quality=94, optimize=True)
         return download_response(out, "enhanced.jpg")
