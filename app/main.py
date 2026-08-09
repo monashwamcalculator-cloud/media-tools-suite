@@ -79,14 +79,57 @@ def download_response(path: Path, download_name: str | None = None) -> FileRespo
     return FileResponse(path, filename=download_name or path.name, media_type="application/octet-stream")
 
 
+FFMPEG_PATH_CACHE: str | None = None
+
+def get_ffmpeg_binary() -> str:
+    global FFMPEG_PATH_CACHE
+    if FFMPEG_PATH_CACHE and Path(FFMPEG_PATH_CACHE).exists():
+        return FFMPEG_PATH_CACHE
+
+    sys_ffmpeg = shutil.which("ffmpeg")
+    if sys_ffmpeg:
+        FFMPEG_PATH_CACHE = sys_ffmpeg
+        return sys_ffmpeg
+
+    tmp_bin = Path(tempfile.gettempdir()) / "mediaforge" / "bin" / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+    if tmp_bin.exists() and (os.name == "nt" or os.access(tmp_bin, os.X_OK)):
+        FFMPEG_PATH_CACHE = str(tmp_bin)
+        return str(tmp_bin)
+
+    try:
+        tmp_bin.parent.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            url = "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/ffmpeg-4.4.1-win-64.zip"
+        else:
+            url = "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/ffmpeg-4.4.1-linux-64.zip"
+
+        import urllib.request
+        import zipfile
+        zip_file = tmp_bin.parent / "ffmpeg_dl.zip"
+        urllib.request.urlretrieve(url, zip_file)
+        with zipfile.ZipFile(zip_file, "r") as z:
+            z.extractall(tmp_bin.parent)
+        zip_file.unlink(missing_ok=True)
+        if not os.name == "nt":
+            tmp_bin.chmod(0o755)
+        if tmp_bin.exists():
+            FFMPEG_PATH_CACHE = str(tmp_bin)
+            return str(tmp_bin)
+    except Exception as e:
+        print("Auto FFmpeg download failed:", e)
+
+    raise HTTPException(500, "FFmpeg is not installed on this server and auto-download failed.")
+
+
 def run_ffmpeg(args: list[str]) -> None:
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *args]
+    ffmpeg_bin = get_ffmpeg_binary()
+    cmd = [ffmpeg_bin, "-hide_banner", "-loglevel", "error", "-y", *args]
     try:
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=180)
     except subprocess.TimeoutExpired:
         raise HTTPException(504, "Processing timed out")
     except FileNotFoundError:
-        raise HTTPException(500, "FFmpeg is not installed or available on PATH on this server.")
+        raise HTTPException(500, "FFmpeg executable not found.")
     if proc.returncode != 0:
         msg = proc.stderr.decode("utf-8", errors="replace")[-1500:]
         raise HTTPException(500, f"FFmpeg error: {msg}")
@@ -209,7 +252,12 @@ def index() -> HTMLResponse:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "ffmpeg": shutil.which("ffmpeg") is not None, "tools": 10}
+    ffmpeg_available = False
+    try:
+        ffmpeg_available = get_ffmpeg_binary() is not None
+    except Exception:
+        pass
+    return {"status": "ok", "ffmpeg": ffmpeg_available, "tools": 10}
 
 
 @app.post("/api/image/background-remove")
