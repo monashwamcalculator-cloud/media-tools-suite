@@ -110,7 +110,7 @@ def smart_remove_background(pil_img: Image.Image) -> Image.Image:
     except Exception:
         pass
 
-    # Tested offline fallback: Fast scaled GrabCut with a safe centered-subject rectangle.
+    # Person-focused background removal using face/body region targeting and GrabCut
     rgb = np.array(pil_img.convert("RGB"))
     bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     h, w = bgr.shape[:2]
@@ -129,15 +129,58 @@ def smart_remove_background(pil_img: Image.Image) -> Image.Image:
         proc_bgr = bgr
 
     ph, pw = proc_bgr.shape[:2]
-    margin_x = max(1, int(pw * 0.04))
-    margin_y = max(1, int(ph * 0.04))
-    rect = (margin_x, margin_y, max(2, pw - 2 * margin_x), max(2, ph - 2 * margin_y))
-    mask = np.zeros((ph, pw), np.uint8)
+    gray = cv2.cvtColor(proc_bgr, cv2.COLOR_BGR2GRAY)
+
+    # Initialize mask for GrabCut: default border as Definite Background
+    mask = np.full((ph, pw), cv2.GC_BGD, dtype=np.uint8)
+    border_x = max(1, int(pw * 0.03))
+    border_y = max(1, int(ph * 0.03))
+    mask[border_y:ph-border_y, border_x:pw-border_x] = cv2.GC_PR_BGD
+
+    # Detect human face to locate primary person subject
+    detected_person = False
+    try:
+        cascade_path = getattr(cv2.data, "haarcascades", "") + "haarcascade_frontalface_default.xml"
+        face_cascade = cv2.CascadeClassifier(cascade_path)
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(25, 25))
+        if len(faces) > 0:
+            # Pick largest/primary face
+            primary_face = max(faces, key=lambda f: f[2] * f[3])
+            fx, fy, fw, fh = primary_face
+
+            # Estimate person body bounds (head, hair, shoulders, torso)
+            px1 = max(0, int(fx - fw * 0.8))
+            py1 = max(0, int(fy - fh * 0.4))
+            px2 = min(pw, int(fx + fw * 1.8))
+            py2 = min(ph, int(fy + fh * 4.5))
+
+            # Person region is Probable Foreground
+            mask[py1:py2, px1:px2] = cv2.GC_PR_FGD
+
+            # Core face & upper torso is Definite Foreground
+            core_x1 = max(0, int(fx - fw * 0.2))
+            core_y1 = max(0, int(fy))
+            core_x2 = min(pw, int(fx + fw * 1.2))
+            core_y2 = min(ph, int(fy + fh * 2.2))
+            mask[core_y1:core_y2, core_x1:core_x2] = cv2.GC_FGD
+            detected_person = True
+    except Exception:
+        pass
+
+    if not detected_person:
+        # Fallback human silhouette centered region
+        cx1 = int(pw * 0.15)
+        cy1 = int(ph * 0.08)
+        cx2 = int(pw * 0.85)
+        cy2 = int(ph * 0.95)
+        mask[cy1:cy2, cx1:cx2] = cv2.GC_PR_FGD
+        mask[int(ph * 0.2):int(ph * 0.8), int(pw * 0.3):int(pw * 0.7)] = cv2.GC_FGD
+
     bgd = np.zeros((1, 65), np.float64)
     fgd = np.zeros((1, 65), np.float64)
     try:
-        cv2.grabCut(proc_bgr, mask, rect, bgd, fgd, 3, cv2.GC_INIT_WITH_RECT)
-        fgmask = np.where((mask == 2) | (mask == 0), 0, 255).astype("uint8")
+        cv2.grabCut(proc_bgr, mask, None, bgd, fgd, 4, cv2.GC_INIT_WITH_MASK)
+        fgmask = np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 255, 0).astype("uint8")
     except cv2.error:
         # Color-distance fallback using corner median as approximate background.
         corners = np.vstack([
